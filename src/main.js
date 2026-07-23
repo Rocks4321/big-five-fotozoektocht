@@ -1,463 +1,596 @@
 import './style.css'
 import { createClient } from '@supabase/supabase-js'
 
-const app = document.querySelector('#app')
-let teamNameGlobal = ''
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY
 
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
 
-const Params = new URLSearchParams(window.location.search)
-let POST_ID = Number(Params.get('quiz')) || 1
+const app = document.querySelector('#app')
+
+let teamName = ''
+let questions = []
+let answers = {}
 let startedAt = null
-let loadedQuestions = []
 
-function showMessage(text, type = 'info') {
-  const messageDiv = document.querySelector('#message')
-
-  if (!messageDiv) {
-    console.warn('messageDiv bestaat nog niet')
-    return
-  }
-
-  messageDiv.textContent = text
-  messageDiv.className = `message ${type}`
-
-  if (type === 'success') {
-    messageDiv.classList.add('centered')
-  } else {
-    messageDiv.classList.remove('centered')
-  }
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;')
 }
 
-function showSuccessMessage(text) {
-  const existing = document.querySelector('.success-popup')
-  if (existing) existing.remove()
-
-  const div = document.createElement('div')
-  div.className = 'success-popup'
-  div.textContent = text
-
-  document.body.appendChild(div)
-
+function normalizeTeamName(value) {
+  return String(value ?? '')
+    .trim()
+    .replace(/\s+/g, ' ')
 }
 
-function renderQuizLogo() {
-  return `
-    <div class="quiz-logo">
-      <img src="/logo-rnr.png" alt="logo" />
-    </div>
-  `
+function compareTeamNames(value) {
+  return normalizeTeamName(value).toLocaleLowerCase('nl-NL')
 }
 
-function normalizeTeamName(name) {
-  return name.trim().replace(/\s+/g, ' ')
-}
-
-if (!Params.get('quiz')) {
-  app.innerHTML = `
-    ${renderQuizLogo()}
-
-    <div class="container">
-      <div class="error-card">
-        <h1>GPS Tocht App</h1>
-        <p>Scan een QR-code om een quiz te starten.</p>
-      </div>
-    </div>
-  `
-} else {
-  showStartScreen()
+function isDuplicateConstraintError(error) {
+  return error?.code === '23505'
 }
 
 function showStartScreen() {
-  const savedTeam = localStorage.getItem('teamName')
+  teamName = ''
+  questions = []
+  answers = {}
+  startedAt = null
 
   app.innerHTML = `
-    ${renderQuizLogo()}
-
-    <div class="container">
-      <div class="start-card">
-        <h1>Quiz ${Params.get('quiz')}</h1>
-
-        ${
-          savedTeam
-            ? `<p><strong>Team: ${savedTeam}</strong></p>`
-            : `
-              <div class="input-group">
-                <label for="teamInput">Voer je teamnaam in:</label>
-                <input type="text" id="teamInput" placeholder="Teamnaam" />
-              </div>
-            `
-        }
-
-        <button id="startButton">Start Quiz</button>
-        <div id="message"></div>
-      </div>
+    <div class="quiz-logo">
+      <img
+        src="${import.meta.env.BASE_URL}logo-rnr.png"
+        alt="Rocks 'n Rivers logo"
+      />
     </div>
+
+    <main class="quiz-page">
+      <section class="quiz-card start-card">
+        <h1>Big Five Fotozoektocht</h1>
+
+        <p>Vul jullie teamnaam in en start de quiz.</p>
+
+        <form id="teamForm">
+          <label for="teamName">
+            <strong>Teamnaam</strong>
+          </label>
+
+          <input
+            id="teamName"
+            name="teamName"
+            type="text"
+            maxlength="60"
+            autocomplete="off"
+            placeholder="Bijvoorbeeld: Team Leeuw"
+            required
+          />
+
+          <button type="submit" id="startButton">
+            Start quiz
+          </button>
+        </form>
+
+        <p id="startError" class="error-message"></p>
+      </section>
+    </main>
   `
 
-  document.querySelector('#startButton').addEventListener('click', () => {
-    const teamName =
-      savedTeam ||
-      normalizeTeamName(document.querySelector('#teamInput')?.value)
+  const teamForm = document.querySelector('#teamForm')
+  const teamNameInput = document.querySelector('#teamName')
+  const startButton = document.querySelector('#startButton')
+  const startError = document.querySelector('#startError')
 
-    if (!teamName) {
-      showMessage('Voer eerst een teamnaam in.', 'error')
+  teamNameInput.focus()
+
+  teamForm.addEventListener('submit', async (event) => {
+    event.preventDefault()
+
+    const enteredName = normalizeTeamName(teamNameInput.value)
+
+    if (!enteredName) {
+      startError.textContent = 'Vul eerst een teamnaam in.'
+      teamNameInput.focus()
       return
     }
 
-    teamNameGlobal = teamName
-    loadAndStartQuiz()
+    teamNameInput.value = enteredName
+    startError.textContent = ''
+    startButton.disabled = true
+    startButton.textContent = 'Teamnaam controleren...'
+
+    const nameIsAlreadyUsed = await teamNameAlreadyExists(enteredName)
+
+    if (nameIsAlreadyUsed === null) {
+      startError.textContent =
+        'De teamnaam kon niet worden gecontroleerd. Probeer het opnieuw.'
+
+      startButton.disabled = false
+      startButton.textContent = 'Start quiz'
+      return
+    }
+
+    if (nameIsAlreadyUsed) {
+      startError.textContent =
+        `Teamnaam "${enteredName}" heeft de quiz al ingevuld. ` +
+        'Kies een andere teamnaam.'
+
+      startButton.disabled = false
+      startButton.textContent = 'Start quiz'
+
+      teamNameInput.focus()
+      teamNameInput.select()
+      return
+    }
+
+    teamName = enteredName
+    startButton.textContent = 'Quiz laden...'
+
+    await loadQuestions()
   })
 }
 
-async function loadAndStartQuiz() {
-  console.log('POST_ID:', POST_ID)
-  console.log('URL params:', Params.get('quiz'))
-
-  app.innerHTML = `
-    ${renderQuizLogo()}
-
-    <div class="container container--quiz">
-      <div id="quiz"></div>
-    </div>
-  `
-
-  const quizDiv = document.querySelector('#quiz')
-  
-
-  const teamName = normalizeTeamName(teamNameGlobal)
-  const { data: teamRows, error: teamError } = await supabase
-  .from('Teams')
-  .select('team_name')
-  .eq('team_name', teamName)
-  .limit(1)
-
-if (teamError) {
-  console.error(teamError)
-  app.innerHTML = `
-    ${renderQuizLogo()}
-
-    <div class="container">
-      <div class="start-card">
-        <h1>Quiz ${Params.get('quiz')}</h1>
-        <p class="duplicate-message">Fout bij controleren van teamnaam.</p>
-        <button id="backButton" type="button">Terug</button>
-      </div>
-    </div>
-  `
-  document.querySelector('#backButton').addEventListener('click', showStartScreen)
-  return
-}
-
-if (!teamRows || teamRows.length === 0) {
-  app.innerHTML = `
-    ${renderQuizLogo()}
-
-    <div class="container">
-      <div class="start-card">
-        <h1>Quiz ${Params.get('quiz')}</h1>
-        <p class="duplicate-message">Deze teamnaam is niet geregistreerd. Registreer je team eerst.</p>
-        <button id="backButton" type="button">Terug</button>
-      </div>
-    </div>
-  `
-  document.querySelector('#backButton').addEventListener('click', showStartScreen)
-  return
-}
-
-  if (!teamName) {
-  return
-  }
-
-  console.log(
-    'Checking team submission in loadAndStartQuiz for team:',
-    JSON.stringify(teamName),
-    'quiz:',
-    POST_ID
-  )
-
-  const { data: existingRows, error: existingError } = await supabase
-    .from('Submissions')
-    .select('id, team_name, post_id')
-    .eq('team_name', teamName)
-    .eq('post_id', POST_ID)
-    .limit(1)
-
-  console.log('Query result existingRows:', existingRows)
-
-  if (existingError) {
-    console.error(existingError)
-    showMessage('Fout bij controleren van eerdere inzending.', 'error')
-    return
-  }
-
-  if (existingRows && existingRows.length > 0) {
-  app.innerHTML = `
-    ${renderQuizLogo()}
-
-    <div class="container">
-      <div class="start-card">
-        <h1>Quiz ${Params.get('quiz')}</h1>
-        <p class="duplicate-message">Jullie team heeft deze quiz al ingediend.</p>
-        <button id="backButton" type="button">Terug</button>
-      </div>
-    </div>
-  `
-
-  document.querySelector('#backButton').addEventListener('click', showStartScreen)
-  return
-}
-
-  startedAt = new Date().toISOString()
-
+async function teamNameAlreadyExists(enteredName) {
   const { data, error } = await supabase
-    .from('Questions')
+    .from('submissions')
+    .select('team_name')
+
+  if (error) {
+    console.error('Fout bij controleren teamnaam:', error)
+    return null
+  }
+
+  const normalizedEnteredName = compareTeamNames(enteredName)
+
+  return (data ?? []).some(
+    (submission) =>
+      compareTeamNames(submission.team_name) === normalizedEnteredName
+  )
+}
+
+async function loadQuestions() {
+  const { data, error } = await supabase
+    .from('questions')
     .select('*')
-    .eq('post_id', POST_ID)
     .order('question_number', { ascending: true })
 
   if (error) {
-    console.error(error)
-    showMessage('Fout bij ophalen vragen.', 'error')
+    console.error('Fout bij laden vragen:', error)
+    showLoadError('De quiz kon niet worden geladen.')
     return
   }
 
   if (!data || data.length === 0) {
-    showMessage('Geen vragen gevonden voor deze quiz.', 'error')
+    showLoadError('Er zijn nog geen quizvragen ingevoerd.')
     return
   }
 
-  loadedQuestions = data
+  questions = data
+  answers = {}
+  startedAt = new Date()
 
-  let html = '<h2>Vragen</h2>'
-
-  data.forEach((q) => {
-    html += `
-      <div class="question">
-        <p><strong>${q.question_number}. ${q.question_text}</strong></p>
-
-        ${
-          q.image_url
-            ? `
-          <div class="question-image">
-            <img src="${q.image_url}" alt="vraag afbeelding" />
-          </div>
-        `
-            : ''
-        }
-
-        <label class="answer-option">
-          <input type="radio" name="q${q.id}" value="A" />
-          ${q.option_a}
-        </label>
-
-        <label class="answer-option">
-          <input type="radio" name="q${q.id}" value="B" />
-          ${q.option_b}
-        </label>
-
-        <label class="answer-option">
-          <input type="radio" name="q${q.id}" value="C" />
-          ${q.option_c}
-        </label>
-
-        ${
-          q.option_d
-            ? `
-          <label class="answer-option">
-            <input type="radio" name="q${q.id}" value="D" />
-            ${q.option_d}
-          </label>
-        `
-            : ''
-        }
-      </div>
-    `
-  })
-
-  html += `
-    <button id="submitButton" type="button">Verzenden</button>
-    <div id="message"></div>
-  `
-
-  quizDiv.innerHTML = html
-
-  document.querySelector('#submitButton').addEventListener('click', submitQuiz)
+  renderQuiz()
 }
 
-function renderFeedbackScreen(questions, answers) {
-  const totalQuestions = questions.length
+function showLoadError(message) {
+  app.innerHTML = `
+    <div class="quiz-logo">
+      <img
+        src="${import.meta.env.BASE_URL}logo-rnr.png"
+        alt="Rocks 'n Rivers logo"
+      />
+    </div>
 
-  const correctCount = questions.filter((q) => {
-    const given = answers.find(a => a.question_id === q.id)?.given_answer || '-'
-    return given === q.correct_answer
-  }).length
+    <main class="quiz-page">
+      <section class="quiz-card">
+        <h1>Quiz niet beschikbaar</h1>
+        <p>${escapeHtml(message)}</p>
 
-  let html = `
-    ${renderQuizLogo()}
-    <div class="container container--quiz">
-      <div class="feedback-card">
-        <h1>Jullie antwoorden zijn ontvangen</h1>
-
-        <div class="feedback-score">
-          🎯 Score: ${correctCount} / ${totalQuestions} goed
-        </div>
-
-        <div class="feedback-list">
+        <button id="backButton">
+          Terug
+        </button>
+      </section>
+    </main>
   `
 
-  questions.forEach((q) => {
-    const given = answers.find(a => a.question_id === q.id)?.given_answer || '-'
-    const correct = q.correct_answer
-    const isCorrect = given === correct
+  document
+    .querySelector('#backButton')
+    .addEventListener('click', showStartScreen)
+}
 
-    const answerTextMap = {
-      A: q.option_a,
-      B: q.option_b,
-      C: q.option_c,
-      D: q.option_d || '-',
-    }
+function showDuplicateTeamScreen() {
+  app.innerHTML = `
+    <div class="quiz-logo">
+      <img
+        src="${import.meta.env.BASE_URL}logo-rnr.png"
+        alt="Rocks 'n Rivers logo"
+      />
+    </div>
 
-    html += `
-      <div class="feedback-item ${isCorrect ? 'correct' : 'wrong'}">
-        <p><strong>${q.question_number}. ${q.question_text}</strong></p>
-        <p>Jullie antwoord: <strong>${given}</strong> - ${answerTextMap[given] || '-'}</p>
-        <p>Juiste antwoord: <strong>${correct}</strong> - ${answerTextMap[correct] || '-'}</p>
-        <p>${isCorrect ? '✅ Goed' : '❌ Fout'}</p>
-      </div>
+    <main class="quiz-page">
+      <section class="quiz-card start-card">
+        <h1>Quiz al ingevuld</h1>
+
+        <p>
+          Teamnaam <strong>${escapeHtml(teamName)}</strong>
+          heeft de quiz al ingevuld.
+        </p>
+
+        <p>
+          Kies een andere teamnaam of neem contact op met de instructeur.
+        </p>
+
+        <button id="backToStartButton">
+          Andere teamnaam kiezen
+        </button>
+      </section>
+    </main>
+  `
+
+  document
+    .querySelector('#backToStartButton')
+    .addEventListener('click', showStartScreen)
+
+  window.scrollTo({
+    top: 0,
+    behavior: 'smooth',
+  })
+}
+
+function getOptions(question) {
+  return [
+    { letter: 'A', text: question.option_a },
+    { letter: 'B', text: question.option_b },
+    { letter: 'C', text: question.option_c },
+    { letter: 'D', text: question.option_d },
+  ].filter((option) => option.text)
+}
+
+function renderQuiz() {
+  let questionsHtml = ''
+
+  questions.forEach((question) => {
+    const options = getOptions(question)
+
+    const optionsHtml = options
+      .map(
+        (option) => `
+          <label class="answer-option">
+            <input
+              type="radio"
+              name="question-${question.id}"
+              value="${option.letter}"
+              data-question-id="${question.id}"
+              ${answers[question.id] === option.letter ? 'checked' : ''}
+            />
+
+            <span class="answer-letter">${option.letter}</span>
+
+            <span class="answer-text">
+              ${escapeHtml(option.text)}
+            </span>
+          </label>
+        `
+      )
+      .join('')
+
+    questionsHtml += `
+      <section class="quiz-card question-card" id="question-${question.id}">
+        <h2>
+          Vraag ${question.question_number}
+        </h2>
+
+        <p class="question-text">
+          ${escapeHtml(question.question_text)}
+        </p>
+
+        <div class="answer-options">
+          ${optionsHtml}
+        </div>
+      </section>
     `
   })
 
-  html += `
-        </div>
-      </div>
+  app.innerHTML = `
+    <div class="quiz-logo">
+      <img
+        src="${import.meta.env.BASE_URL}logo-rnr.png"
+        alt="Rocks 'n Rivers logo"
+      />
     </div>
+
+    <main class="quiz-page">
+      <section class="quiz-card quiz-header-card">
+        <h1>Big Five Fotozoektocht</h1>
+        <p><strong>Team:</strong> ${escapeHtml(teamName)}</p>
+        <p>Beantwoord alle vragen en klik daarna op verzenden.</p>
+      </section>
+
+      <form id="quizForm">
+        ${questionsHtml}
+
+        <section class="quiz-card submit-card">
+          <p id="quizError" class="error-message"></p>
+
+          <button type="submit" id="submitQuizButton">
+            Quiz verzenden
+          </button>
+        </section>
+      </form>
+    </main>
   `
 
-  app.innerHTML = html
+  document.querySelectorAll('input[type="radio"]').forEach((input) => {
+    input.addEventListener('change', () => {
+      answers[input.dataset.questionId] = input.value
+    })
+  })
+
+  document
+    .querySelector('#quizForm')
+    .addEventListener('submit', submitQuiz)
 }
 
 async function submitQuiz(event) {
   event.preventDefault()
-  console.log('submitQuiz gestart, POST_ID:', POST_ID, 'team:', teamNameGlobal)
 
-  showMessage('', 'info')
+  const quizError = document.querySelector('#quizError')
+  const submitButton = document.querySelector('#submitQuizButton')
 
-  const teamName = normalizeTeamName(teamNameGlobal)
+  const unansweredQuestions = questions.filter(
+    (question) => !answers[question.id]
+  )
 
-  if (!teamName) {
-    showMessage('Geen teamnaam ingevuld.', 'error')
+  if (unansweredQuestions.length > 0) {
+    quizError.textContent =
+      unansweredQuestions.length === 1
+        ? 'Beantwoord eerst de ontbrekende vraag.'
+        : `Beantwoord eerst alle vragen. Er ontbreken nog ${unansweredQuestions.length} antwoorden.`
+
+    const firstMissingQuestion = unansweredQuestions[0]
+
+    document
+      .querySelector(`#question-${firstMissingQuestion.id}`)
+      ?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      })
+
     return
   }
 
-  console.log('Checking existing submissions for team:', JSON.stringify(teamName), 'quiz:', POST_ID)
+  quizError.textContent = ''
+  submitButton.disabled = true
+  submitButton.textContent = 'Teamnaam controleren...'
 
-  const { data: existingRows, error: existingError } = await supabase
-    .from('Submissions')
-    .select('id, team_name, post_id')
-    .eq('team_name', teamName)
-    .eq('post_id', POST_ID)
-    .limit(1)
+  const nameIsAlreadyUsed = await teamNameAlreadyExists(teamName)
 
-  console.log('Query result existingRows:', existingRows)
+  if (nameIsAlreadyUsed === null) {
+    quizError.textContent =
+      'De teamnaam kon niet worden gecontroleerd. Probeer het opnieuw.'
 
-  if (existingError) {
-    console.error(existingError)
-    showMessage('Fout bij controleren van eerdere inzending.', 'error')
+    submitButton.disabled = false
+    submitButton.textContent = 'Quiz verzenden'
     return
   }
 
-  if (existingRows && existingRows.length > 0) {
-    app.innerHTML = `
-      ${renderQuizLogo()}
-
-      <div class="container">
-        <div class="start-card">
-          <h1>Quiz ${Params.get('quiz')}</h1>
-          <p class="duplicate-message">Jullie team heeft deze quiz al ingediend.</p>
-          <button id="backButton" type="button">Terug</button>
-        </div>
-      </div>
-    `
-
-    document.querySelector('#backButton').addEventListener('click', showStartScreen)
+  if (nameIsAlreadyUsed) {
+    showDuplicateTeamScreen()
     return
   }
 
-  const answers = []
-  let score = 0
-  let correctAnswers = 0
+  submitButton.textContent = 'Bezig met verzenden...'
 
-  for (const q of loadedQuestions) {
-    const selected = document.querySelector(`input[name="q${q.id}"]:checked`)
+  const submittedAt = new Date()
 
-    if (!selected) {
-      showMessage('Beantwoord alle vragen.', 'error')
-      return
+  const durationSeconds = Math.max(
+    0,
+    Math.round((submittedAt.getTime() - startedAt.getTime()) / 1000)
+  )
+
+  const answerResults = questions.map((question) => {
+    const selectedAnswer = answers[question.id]
+    const correctAnswer = String(question.correct_answer).toUpperCase()
+    const isCorrect = selectedAnswer === correctAnswer
+
+    return {
+      question,
+      selectedAnswer,
+      correctAnswer,
+      isCorrect,
     }
+  })
 
-    const givenAnswer = selected.value
+  const correctCount = answerResults.filter(
+    (answer) => answer.isCorrect
+  ).length
 
-    if (givenAnswer === q.correct_answer) {
-      score += 1
-      correctAnswers += 1
-    }
+  const incorrectCount = questions.length - correctCount
 
-    answers.push({
-      question_id: q.id,
-      given_answer: givenAnswer,
+  const { data: submission, error: submissionError } = await supabase
+    .from('submissions')
+    .insert({
+      team_name: teamName,
+      started_at: startedAt.toISOString(),
+      submitted_at: submittedAt.toISOString(),
+      duration_seconds: durationSeconds,
+      correct_count: correctCount,
+      incorrect_count: incorrectCount,
     })
-  }
-
-  const { data: submissionData, error: submissionError } = await supabase
-    .from('Submissions')
-    .insert([
-      {
-        team_name: teamName,
-        post_id: POST_ID,
-        started_at: startedAt,
-        submitted_at: new Date().toISOString(),
-        status: 'submitted',
-        score,
-        correct_answers: correctAnswers,
-        total_questions: loadedQuestions.length,
-      },
-    ])
-    .select()
+    .select('id')
+    .single()
 
   if (submissionError) {
-    console.error('Insert error:', submissionError)
-    console.log('Insert error full:', JSON.stringify(submissionError, null, 2))
+    console.error('Fout bij opslaan inzending:', submissionError)
 
-    if (submissionError.code === '23505') {
-      showMessage('Deze quiz is al door jullie team ingediend.', 'error')
+    if (isDuplicateConstraintError(submissionError)) {
+      showDuplicateTeamScreen()
       return
     }
 
-    showMessage(`Fout bij opslaan van submission: ${submissionError.message}`, 'error')
+    quizError.textContent =
+      'De quiz kon niet worden opgeslagen. Probeer het opnieuw.'
+
+    submitButton.disabled = false
+    submitButton.textContent = 'Quiz verzenden'
     return
   }
 
-  const submissionId = submissionData?.[0]?.id
-
-  const rows = answers.map((a) => ({
-    submission_id: submissionId,
-    question_id: a.question_id,
-    given_answer: a.given_answer,
+  const answersToInsert = answerResults.map((answer) => ({
+    submission_id: submission.id,
+    question_id: answer.question.id,
+    selected_answer: answer.selectedAnswer,
+    is_correct: answer.isCorrect,
   }))
 
   const { error: answersError } = await supabase
     .from('submission_answers')
-    .insert(rows)
+    .insert(answersToInsert)
 
   if (answersError) {
-    console.error(answersError)
-    showMessage('Fout bij opslaan van antwoorden.', 'error')
+    console.error('Fout bij opslaan antwoorden:', answersError)
+
+    await supabase
+      .from('submissions')
+      .delete()
+      .eq('id', submission.id)
+
+    quizError.textContent =
+      'De antwoorden konden niet worden opgeslagen. Probeer het opnieuw.'
+
+    submitButton.disabled = false
+    submitButton.textContent = 'Quiz verzenden'
     return
   }
 
-  renderFeedbackScreen(loadedQuestions, answers)
+  renderResults(
+    answerResults,
+    correctCount,
+    incorrectCount,
+    durationSeconds
+  )
 }
+
+function formatDuration(totalSeconds) {
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
+}
+
+function getOptionText(question, letter) {
+  const option = getOptions(question).find(
+    (item) => item.letter === letter
+  )
+
+  return option?.text || '-'
+}
+
+function renderResults(
+  answerResults,
+  correctCount,
+  incorrectCount,
+  durationSeconds
+) {
+  const resultsHtml = answerResults
+    .map((answer) => {
+      const resultClass = answer.isCorrect
+        ? 'result-correct'
+        : 'result-incorrect'
+
+      const resultLabel = answer.isCorrect ? '✅ Goed' : '❌ Fout'
+
+      return `
+        <section class="quiz-card result-card ${resultClass}">
+          <h2>
+            Vraag ${answer.question.question_number}: ${resultLabel}
+          </h2>
+
+          <p class="question-text">
+            ${escapeHtml(answer.question.question_text)}
+          </p>
+
+          <p>
+            <strong>Jullie antwoord:</strong>
+            ${escapeHtml(answer.selectedAnswer)} –
+            ${escapeHtml(
+              getOptionText(
+                answer.question,
+                answer.selectedAnswer
+              )
+            )}
+          </p>
+
+          <p>
+            <strong>Juiste antwoord:</strong>
+            ${escapeHtml(answer.correctAnswer)} –
+            ${escapeHtml(
+              getOptionText(
+                answer.question,
+                answer.correctAnswer
+              )
+            )}
+          </p>
+
+          ${
+            answer.question.explanation
+              ? `
+                <p>
+                  <strong>Uitleg:</strong>
+                  ${escapeHtml(answer.question.explanation)}
+                </p>
+              `
+              : ''
+          }
+        </section>
+      `
+    })
+    .join('')
+
+  app.innerHTML = `
+    <div class="quiz-logo">
+      <img
+        src="${import.meta.env.BASE_URL}logo-rnr.png"
+        alt="Rocks 'n Rivers logo"
+      />
+    </div>
+
+    <main class="quiz-page">
+      <section class="quiz-card results-summary-card">
+        <h1>Uitslag</h1>
+
+        <p><strong>Team:</strong> ${escapeHtml(teamName)}</p>
+
+        <div class="score-display">
+          ${correctCount} van de ${questions.length} goed
+        </div>
+
+        <p>
+          <strong>Fout:</strong> ${incorrectCount}
+        </p>
+
+        <p>
+          <strong>Tijd:</strong> ${formatDuration(durationSeconds)}
+        </p>
+      </section>
+
+      ${resultsHtml}
+
+      <section class="quiz-card">
+        <p>De antwoorden zijn verzonden.</p>
+      </section>
+    </main>
+  `
+
+  window.scrollTo({
+    top: 0,
+    behavior: 'smooth',
+  })
+}
+
+showStartScreen()
