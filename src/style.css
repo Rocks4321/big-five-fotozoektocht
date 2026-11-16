@@ -749,3 +749,42 @@ tbody tr:last-child td {
     width: 100%;
   }
 }
+
+/* Quiz timer */
+
+.question-timer {
+  text-align: center;
+  font-size: 26px;
+  font-weight: bold;
+  background: #fff3cd;
+  border: 2px solid #ffc107;
+  border-radius: 12px;
+  padding: 18px;
+  margin: 18px 0 12px;
+  color: #222;
+}
+
+#secondsLeft {
+  font-size: 38px;
+  font-weight: 800;
+}
+
+/* Antwoord selecteren */
+
+.answer-option:has(input:checked) {
+  background-color: #d4edda;
+  border: 2px solid #28a745;
+}
+
+/* Timer en vraag op kleinere schermen */
+
+@media (max-width: 600px) {
+  .question-timer {
+    font-size: 20px;
+    padding: 12px;
+  }
+
+  #secondsLeft {
+    font-size: 32px;
+  }
+}
