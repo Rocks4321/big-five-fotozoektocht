@@ -1069,6 +1069,7 @@ function getOptions(question) {
   ].filter(option => option.text)
 }
 
+
 async function startQuiz() {
   try {
     const existing = await getQuizSubmission()
@@ -1077,38 +1078,49 @@ async function startQuiz() {
       await showHome()
       return
     }
-  } catch (error) {
-    console.error(error)
-    showError('Quizstatus controleren mislukt.')
-    return
-  }
 
-  page(`
-    <section class="quiz-card">
-      <p>Kennisquiz laden...</p>
-    </section>
-  `)
+    page(`
+      <section class="quiz-card">
+        <p>Kennisquiz laden...</p>
+      </section>
+    `)
 
-  const { data, error } = await supabase
-    .from('questions')
-    .select('*')
-    .order('question_number', {
-      ascending: true
-    })
+    // Starttijd veilig registreren bij Supabase.
+    const { data: startTime, error: startError } =
+      await supabase.rpc('start_big_five_quiz', {
+        p_team_id: currentTeam.id
+      })
 
-  if (error || !data?.length) {
-    showError(
-      'De kennisquiz kon niet worden geladen.'
+    if (startError) throw startError
+
+    // Vragen ophalen zonder juiste antwoorden.
+    const { data, error } = await supabase.rpc(
+      'get_big_five_quiz_questions'
     )
-    return
+
+    if (error) throw error
+
+    if (!data?.length) {
+      throw new Error('Geen quizvragen gevonden.')
+    }
+
+    questions = data
+
+    quizAnswers = {}
+    currentQuestionIndex = 0
+
+    startedAt = new Date(startTime)
+
+    showQuestion()
+
+  } catch (error) {
+    console.error('Quiz starten mislukt:', error)
+
+    showError(
+      error.message ||
+      'De kennisquiz kon niet worden gestart.'
+    )
   }
-
-  questions = data
-  quizAnswers = {}
-  currentQuestionIndex = 0
-  startedAt = new Date()
-
-  showQuestion()
 }
 
 // ===================================
@@ -1351,6 +1363,7 @@ function finishQuestion() {
 // KENNISQUIZ OPSLAAN
 // ===================================
 
+
 async function saveQuiz() {
   if (submitting) return
 
@@ -1358,85 +1371,42 @@ async function saveQuiz() {
 
   page(`
     <section class="quiz-card">
-
       <h1>Quiz afgerond</h1>
-
-      <p>Antwoorden opslaan...</p>
-
+      <p>Antwoorden veilig opslaan...</p>
       <p
         id="saveError"
         class="error-message"
       ></p>
-
+      <button
+        id="retrySave"
+        type="button"
+        hidden
+      >
+        Opnieuw proberen
+      </button>
     </section>
   `)
 
   try {
-    const submittedAt = new Date()
+    // Supabase berekent de score.
+    // De browser verstuurt alleen de
+    // antwoorden A, B, C, D of null.
 
-    const durationSeconds = Math.max(
-      0,
-      Math.round(
-        (submittedAt - startedAt) / 1000
-      )
-    )
-
-    const results = questions.map(question => {
-      const selected =
-        quizAnswers[question.id] ?? null
-
-      const correct =
-        String(question.correct_answer)
-          .toUpperCase()
-
-      return {
-        question,
-        selected,
-        correct,
-        isCorrect: selected === correct
+    const { data, error } = await supabase.rpc(
+      'submit_big_five_quiz',
+      {
+        p_team_id: currentTeam.id,
+        p_answers: quizAnswers
       }
-    })
-
-    const correctCount =
-      results.filter(
-        result => result.isCorrect
-      ).length
-
-    const { data: submission, error } =
-      await supabase
-        .from('submissions')
-        .insert({
-          team_id: currentTeam.id,
-          team_name: currentTeam.team_name,
-          started_at: startedAt.toISOString(),
-          submitted_at: submittedAt.toISOString(),
-          duration_seconds: durationSeconds,
-          correct_count: correctCount,
-          incorrect_count:
-            questions.length - correctCount
-        })
-        .select('id')
-        .single()
+    )
 
     if (error) throw error
 
-    const { error: answerError } =
-      await supabase
-        .from('submission_answers')
-        .insert(
-          results.map(result => ({
-            submission_id: submission.id,
-            question_id: result.question.id,
-            selected_answer: result.selected,
-            is_correct: result.isCorrect
-          }))
-        )
+    const correctCount = data.correct_count
+    const totalQuestions =
+      data.correct_count + data.incorrect_count
 
-    if (answerError) {
-      throw new Error(
-        'De quiz is opgeslagen, maar niet alle antwoorden. Neem contact op met de instructeur.'
-      )
-    }
+    // Toon de door Supabase berekende score.
 
     page(`
       <section class="quiz-card results-summary-card">
@@ -1445,11 +1415,12 @@ async function saveQuiz() {
 
         <div class="score-display">
           ${correctCount}
-          van ${questions.length} goed
+          van ${totalQuestions} goed
         </div>
 
         <p>
-          Jullie antwoorden zijn opgeslagen.
+          Jullie antwoorden zijn veilig
+          opgeslagen in Supabase.
         </p>
 
         <button id="home" type="button">
@@ -1462,8 +1433,9 @@ async function saveQuiz() {
     document
       .querySelector('#home')
       .addEventListener('click', showHome)
+
   } catch (error) {
-    console.error(error)
+    console.error('Quiz opslaan mislukt:', error)
 
     const saveError =
       document.querySelector('#saveError')
@@ -1471,12 +1443,25 @@ async function saveQuiz() {
     if (saveError) {
       saveError.textContent =
         error.message ||
-        'Opslaan is mislukt.'
+        'De quiz kon niet worden opgeslagen.'
     }
+
+    const retryButton =
+      document.querySelector('#retrySave')
+
+    if (retryButton) {
+      retryButton.hidden = false
+
+      retryButton.addEventListener('click', () => {
+        saveQuiz()
+      })
+    }
+
   } finally {
     submitting = false
   }
 }
+
 
 // ===================================
 // TIMER BIJ TERUGKOMST
