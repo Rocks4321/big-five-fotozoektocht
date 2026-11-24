@@ -272,11 +272,18 @@ function renderLogin(message = '') {
           />
 
           <button
-            id="loginButton"
-            type="submit"
-          >
-            Inloggen
-          </button>
+  id="loginButton"
+  type="submit"
+>
+  Inloggen
+</button>
+
+<p style="margin-top:18px;">
+  <a href="/reset-password.html">
+    Wachtwoord vergeten?
+  </a>
+</p>
+
 
         </form>
 
